@@ -24,6 +24,15 @@ class ChessGame:
         self.game_result = None  # 'checkmate', 'stalemate', or None
         self.move_history = []
         self.captured_pieces = {"white": [], "black": []}
+        # Track piece movements for castling
+        self.piece_moved = {
+            "white_king": False,
+            "white_rook_queenside": False,
+            "white_rook_kingside": False,
+            "black_king": False,
+            "black_rook_queenside": False,
+            "black_rook_kingside": False,
+        }
 
     def initialize_board(self):
         """Initialize the chess board with pieces in starting positions"""
@@ -226,6 +235,82 @@ class ChessGame:
                 if not target_piece or self.get_piece_color(target_piece) != color:
                     moves.append((new_row, new_col))
 
+        # Add castling moves if available
+        castling_moves = self.get_castling_moves(row, col, color)
+        moves.extend(castling_moves)
+
+        return moves
+
+    def can_castle(self, color, side):
+        """Check if castling is possible for given color and side"""
+        king_key = f"{color}_king"
+        rook_key = f"{color}_rook_{side}"
+
+        # Check if king or rook have moved
+        if self.piece_moved[king_key] or self.piece_moved[rook_key]:
+            return False
+
+        # Determine positions
+        king_row = 7 if color == "white" else 0
+        if side == "kingside":
+            king_col, rook_col = 4, 7
+            between_cols = [5, 6]
+        else:  # queenside
+            king_col, rook_col = 4, 0
+            between_cols = [1, 2, 3]
+
+        # Check if pieces are in correct positions
+        if (
+            self.board[king_row][king_col] != f"{color}_king"
+            or self.board[king_row][rook_col] != f"{color}_rook"
+        ):
+            return False
+
+        # Check if squares between king and rook are empty
+        for col in between_cols:
+            if self.board[king_row][col]:
+                return False
+
+        # Check if king is in check
+        if self.is_king_in_check(color):
+            return False
+
+        # Check if king would pass through or land in check
+        king_path = [4, 5, 6] if side == "kingside" else [4, 3, 2]
+        for col in king_path:
+            # Temporarily move king to check for check
+            original = self.board[king_row][col]
+            self.board[king_row][col] = f"{color}_king"
+            self.board[king_row][4] = ""
+
+            in_check = self.is_king_in_check(color)
+
+            # Restore board
+            self.board[king_row][4] = f"{color}_king"
+            self.board[king_row][col] = original
+
+            if in_check:
+                return False
+
+        return True
+
+    def get_castling_moves(self, row, col, color):
+        """Get available castling moves for the king"""
+        moves = []
+
+        # Only kings on their starting square can castle
+        expected_row = 7 if color == "white" else 0
+        if row != expected_row or col != 4:
+            return moves
+
+        # Check kingside castling
+        if self.can_castle(color, "kingside"):
+            moves.append((expected_row, 6))
+
+        # Check queenside castling
+        if self.can_castle(color, "queenside"):
+            moves.append((expected_row, 2))
+
         return moves
 
     def make_move(self, from_pos, to_pos):
@@ -249,6 +334,19 @@ class ChessGame:
         if (to_row, to_col) not in valid_moves:
             return False, "Invalid move"
 
+        # Check if this is a castling move
+        if piece.endswith("_king") and abs(to_col - from_col) == 2:
+            # Determine which side and move the rook
+            if to_col > from_col:  # Kingside castling
+                rook_from_col, rook_to_col = 7, 5
+            else:  # Queenside castling
+                rook_from_col, rook_to_col = 0, 3
+
+            # Move the rook
+            rook = self.board[from_row][rook_from_col]
+            self.board[from_row][rook_to_col] = rook
+            self.board[from_row][rook_from_col] = ""
+
         # Capture piece if present
         captured_piece = self.board[to_row][to_col]
         if captured_piece:
@@ -257,6 +355,9 @@ class ChessGame:
         # Make the move
         self.board[to_row][to_col] = piece
         self.board[from_row][from_col] = ""
+
+        # Track piece movements for castling
+        self.update_piece_moved_status(piece, from_row, from_col)
 
         # Record move
         move_record = {
@@ -281,6 +382,26 @@ class ChessGame:
                 return True, "Stalemate! Game is a draw!"
 
         return True, "Move successful"
+
+    def update_piece_moved_status(self, piece, from_row, from_col):
+        """Update the piece moved tracking for castling"""
+        color = self.get_piece_color(piece)
+        piece_type = piece.split("_")[1]
+
+        if piece_type == "king":
+            self.piece_moved[f"{color}_king"] = True
+        elif piece_type == "rook":
+            # Determine which rook based on starting position
+            if color == "white" and from_row == 7:
+                if from_col == 0:
+                    self.piece_moved["white_rook_queenside"] = True
+                elif from_col == 7:
+                    self.piece_moved["white_rook_kingside"] = True
+            elif color == "black" and from_row == 0:
+                if from_col == 0:
+                    self.piece_moved["black_rook_queenside"] = True
+                elif from_col == 7:
+                    self.piece_moved["black_rook_kingside"] = True
 
     def find_king(self, color):
         """Find the position of the king of the specified color"""
