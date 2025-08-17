@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chess Game</title>
+    <title>Narnia Chess</title>
     <style>
         * {
             margin: 0;
@@ -46,6 +46,42 @@
         .header p {
             color: #7f8c8d;
             font-size: 1.1rem;
+        }
+
+        .quote {
+            color: #5d4e75;
+            font-style: italic;
+            font-size: 1rem;
+            margin-top: 10px;
+            text-align: center;
+            opacity: 0.8;
+        }
+
+        .check-warning {
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 1.1rem;
+            margin: 10px 0;
+            box-shadow: 0 4px 8px rgba(231, 76, 60, 0.3);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+            }
+
+            50% {
+                transform: scale(1.02);
+            }
+
+            100% {
+                transform: scale(1);
+            }
         }
 
         .game-container {
@@ -106,7 +142,14 @@
         }
 
         .piece {
+            width: 80%;
+            height: 80%;
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
             user-select: none;
+            pointer-events: none;
+            margin: 10%;
             filter: drop-shadow(2px 2px 4px rgba(0, 0, 0, 0.3));
         }
 
@@ -326,8 +369,9 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>♔ Chess Game ♛</h1>
+            <h1>♔ Narnia Chess ♛</h1>
             <p>Play chess with full move validation and beautiful UI</p>
+            <div class="quote">"One always feels better when one has made up one's mind." - C.S. Lewis</div>
         </div>
 
         <div class="game-container">
@@ -430,29 +474,15 @@
                         if (piece) {
                             const pieceElement = document.createElement('div');
                             pieceElement.className = 'piece';
-                            pieceElement.textContent = this.getPieceSymbol(piece);
+                            pieceElement.style.backgroundImage = `url(${this.getPieceImage(piece)})`;
                             square.appendChild(pieceElement);
                         }
                     }
                 }
             }
 
-            getPieceSymbol(piece) {
-                const symbols = {
-                    'white_king': '♔',
-                    'white_queen': '♕',
-                    'white_rook': '♖',
-                    'white_bishop': '♗',
-                    'white_knight': '♘',
-                    'white_pawn': '♙',
-                    'black_king': '♚',
-                    'black_queen': '♛',
-                    'black_rook': '♜',
-                    'black_bishop': '♝',
-                    'black_knight': '♞',
-                    'black_pawn': '♟'
-                };
-                return symbols[piece] || '';
+            getPieceImage(piece) {
+                return `/static/images/pieces/${piece}.png`;
             }
 
             async handleSquareClick(row, col) {
@@ -576,10 +606,13 @@
                         gameStatusElement.textContent = 'Stalemate! Game is a draw!';
                         gameStatusElement.className = 'game-status stalemate';
                     }
+                } else if (this.gameState.in_check) {
+                    // Display check warning
+                    const playerName = this.gameState.current_player.charAt(0).toUpperCase() + this.gameState.current_player.slice(1);
+                    gameStatusElement.innerHTML = `<div class="check-warning">👑 ${playerName} King is in Check! 👑</div>`;
+                    gameStatusElement.className = 'game-status';
                 } else {
-                    // Check if current player is in check
-                    // This would require an additional API call to check for check
-                    // For now, we'll just clear the status
+                    // Clear status when not in check or game over
                     gameStatusElement.textContent = '';
                     gameStatusElement.className = 'game-status';
                 }
@@ -614,8 +647,10 @@
                     pieces.forEach(piece => {
                         const pieceElement = document.createElement('div');
                         pieceElement.className = 'captured-piece';
-                        pieceElement.textContent = this.getPieceSymbol(piece);
-                        pieceElement.style.color = color === 'white' ? '#2c3e50' : '#34495e';
+                        pieceElement.style.backgroundImage = `url(${this.getPieceImage(piece)})`;
+                        pieceElement.style.backgroundSize = 'contain';
+                        pieceElement.style.backgroundRepeat = 'no-repeat';
+                        pieceElement.style.backgroundPosition = 'center';
                         capturedPiecesElement.appendChild(pieceElement);
                     });
                 });

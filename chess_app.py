@@ -519,6 +519,7 @@ class ChessGame:
             "game_result": self.game_result,
             "move_history": self.move_history,
             "captured_pieces": self.captured_pieces,
+            "in_check": self.is_king_in_check(self.current_player),
         }
 
 
