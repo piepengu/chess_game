@@ -4,8 +4,8 @@ Chess Game Application
 A complete chess game with move validation and game state management
 """
 
-import json
-import os
+import uuid
+from collections import OrderedDict
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request, session
@@ -24,6 +24,8 @@ class ChessGame:
         self.game_result = None  # 'checkmate', 'stalemate', or None
         self.move_history = []
         self.captured_pieces = {"white": [], "black": []}
+        self.en_passant_target = None
+        self.winner = None
         # Track piece movements for castling
         self.piece_moved = {
             "white_king": False,
@@ -139,7 +141,34 @@ class ChessGame:
             ):
                 moves.append((new_row, new_col))
 
+        if self.en_passant_target:
+            ep_row, ep_col = self.en_passant_target
+            if ep_row == row + direction and abs(ep_col - col) == 1:
+                moves.append((ep_row, ep_col))
+
         return moves
+
+    def get_pawn_attacks(self, row, col, color):
+        """Squares a pawn attacks, used for check detection"""
+        direction = -1 if color == "white" else 1
+        attacks = []
+        for col_offset in (-1, 1):
+            new_row, new_col = row + direction, col + col_offset
+            if self.is_valid_position(new_row, new_col):
+                attacks.append((new_row, new_col))
+        return attacks
+
+    def get_king_attacks(self, row, col):
+        """One-square king attacks, without castling"""
+        attacks = []
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue
+                new_row, new_col = row + dr, col + dc
+                if self.is_valid_position(new_row, new_col):
+                    attacks.append((new_row, new_col))
+        return attacks
 
     def get_rook_moves(self, row, col, color):
         """Get valid moves for a rook"""
@@ -313,10 +342,76 @@ class ChessGame:
 
         return moves
 
-    def make_move(self, from_pos, to_pos):
+    def _save_position(self):
+        return {
+            "board": [row[:] for row in self.board],
+            "en_passant_target": self.en_passant_target,
+            "piece_moved": dict(self.piece_moved),
+            "captured_pieces": {
+                color: list(pieces) for color, pieces in self.captured_pieces.items()
+            },
+        }
+
+    def _restore_position(self, saved):
+        self.board = saved["board"]
+        self.en_passant_target = saved["en_passant_target"]
+        self.piece_moved = saved["piece_moved"]
+        self.captured_pieces = saved["captured_pieces"]
+
+    def _place_move(self, from_pos, to_pos, promotion=None):
+        """Apply a move, including castling, en passant, and promotion."""
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        piece = self.board[from_row][from_col]
+        color = self.get_piece_color(piece)
+        piece_type = self.get_piece_type(piece)
+        direction = -1 if color == "white" else 1
+
+        if piece_type == "king" and abs(to_col - from_col) == 2:
+            if to_col > from_col:
+                rook_from_col, rook_to_col = 7, 5
+            else:
+                rook_from_col, rook_to_col = 0, 3
+            rook = self.board[from_row][rook_from_col]
+            self.board[from_row][rook_to_col] = rook
+            self.board[from_row][rook_from_col] = ""
+
+        captured_piece = self.board[to_row][to_col]
+        if (
+            piece_type == "pawn"
+            and self.en_passant_target == (to_row, to_col)
+            and not captured_piece
+        ):
+            captured_row = to_row - direction
+            captured_piece = self.board[captured_row][to_col]
+            self.board[captured_row][to_col] = ""
+
+        if captured_piece:
+            self.captured_pieces[color].append(captured_piece)
+
+        moved_piece = piece
+        if piece_type == "pawn" and to_row in (0, 7):
+            choice = promotion if promotion in ("queen", "rook", "bishop", "knight") else "queen"
+            moved_piece = f"{color}_{choice}"
+
+        self.board[to_row][to_col] = moved_piece
+        self.board[from_row][from_col] = ""
+        self.update_piece_moved_status(piece, from_row, from_col)
+
+        if piece_type == "pawn" and abs(to_row - from_row) == 2:
+            self.en_passant_target = ((from_row + to_row) // 2, from_col)
+        else:
+            self.en_passant_target = None
+
+        return moved_piece, captured_piece
+
+    def make_move(self, from_pos, to_pos, promotion=None):
         """Make a move on the board"""
         from_row, from_col = from_pos
         to_row, to_col = to_pos
+
+        if self.game_over:
+            return False, "Game is over"
 
         if not self.is_valid_position(from_row, from_col) or not self.is_valid_position(
             to_row, to_col
@@ -334,52 +429,35 @@ class ChessGame:
         if (to_row, to_col) not in valid_moves:
             return False, "Invalid move"
 
-        # Check if this is a castling move
-        if piece.endswith("_king") and abs(to_col - from_col) == 2:
-            # Determine which side and move the rook
-            if to_col > from_col:  # Kingside castling
-                rook_from_col, rook_to_col = 7, 5
-            else:  # Queenside castling
-                rook_from_col, rook_to_col = 0, 3
+        if (
+            self.get_piece_type(piece) == "pawn"
+            and to_row in (0, 7)
+            and promotion not in ("queen", "rook", "bishop", "knight")
+        ):
+            return False, "Choose a piece to promote to"
 
-            # Move the rook
-            rook = self.board[from_row][rook_from_col]
-            self.board[from_row][rook_to_col] = rook
-            self.board[from_row][rook_from_col] = ""
+        mover = self.current_player
+        moved_piece, captured_piece = self._place_move(from_pos, to_pos, promotion)
 
-        # Capture piece if present
-        captured_piece = self.board[to_row][to_col]
-        if captured_piece:
-            self.captured_pieces[self.current_player].append(captured_piece)
+        self.move_history.append(
+            {
+                "from": from_pos,
+                "to": to_pos,
+                "piece": moved_piece,
+                "captured": captured_piece,
+                "player": mover,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
 
-        # Make the move
-        self.board[to_row][to_col] = piece
-        self.board[from_row][from_col] = ""
+        self.current_player = "black" if mover == "white" else "white"
 
-        # Track piece movements for castling
-        self.update_piece_moved_status(piece, from_row, from_col)
-
-        # Record move
-        move_record = {
-            "from": from_pos,
-            "to": to_pos,
-            "piece": piece,
-            "captured": captured_piece,
-            "player": self.current_player,
-            "timestamp": datetime.now().isoformat(),
-        }
-        self.move_history.append(move_record)
-
-        # Switch players
-        self.current_player = "black" if self.current_player == "white" else "white"
-
-        # Check for checkmate or stalemate
         result = self.is_checkmate_or_stalemate()
-        if result:
-            if result == "checkmate":
-                return True, f"Checkmate! {self.current_player} wins!"
-            else:
-                return True, "Stalemate! Game is a draw!"
+        if result == "checkmate":
+            self.winner = mover
+            return True, f"Checkmate! {mover.capitalize()} wins!"
+        if result == "stalemate":
+            return True, "Stalemate! Game is a draw!"
 
         return True, "Move successful"
 
@@ -431,7 +509,7 @@ class ChessGame:
                     moves = []
 
                     if piece_type == "pawn":
-                        moves = self.get_pawn_moves(row, col, opponent_color)
+                        moves = self.get_pawn_attacks(row, col, opponent_color)
                     elif piece_type == "rook":
                         moves = self.get_rook_moves(row, col, opponent_color)
                     elif piece_type == "knight":
@@ -441,7 +519,7 @@ class ChessGame:
                     elif piece_type == "queen":
                         moves = self.get_queen_moves(row, col, opponent_color)
                     elif piece_type == "king":
-                        moves = self.get_king_moves(row, col, opponent_color)
+                        moves = self.get_king_attacks(row, col)
 
                     # Check if any move can capture the king
                     if king_pos in moves:
@@ -451,26 +529,13 @@ class ChessGame:
 
     def is_move_legal(self, from_pos, to_pos):
         """Check if a move is legal (doesn't leave own king in check)"""
-        from_row, from_col = from_pos
-        to_row, to_col = to_pos
-
-        # Make a temporary move
-        temp_board = [row[:] for row in self.board]
-        piece = temp_board[from_row][from_col]
-        temp_board[to_row][to_col] = piece
-        temp_board[from_row][from_col] = ""
-
-        # Check if this move leaves the current player's king in check
-        # We need to temporarily set the board and check
-        original_board = self.board
-        self.board = temp_board
-
-        in_check = self.is_king_in_check(self.current_player)
-
-        # Restore the original board
-        self.board = original_board
-
-        return not in_check
+        saved = self._save_position()
+        color = self.current_player
+        try:
+            self._place_move(from_pos, to_pos, promotion="queen")
+            return not self.is_king_in_check(color)
+        finally:
+            self._restore_position(saved)
 
     def get_legal_moves(self, row, col):
         """Get all legal moves for a piece (excluding moves that leave king in check)"""
@@ -520,11 +585,27 @@ class ChessGame:
             "move_history": self.move_history,
             "captured_pieces": self.captured_pieces,
             "in_check": self.is_king_in_check(self.current_player),
+            "winner": self.winner,
         }
 
 
-# Global game instance
-game = ChessGame()
+MAX_GAMES = 200
+games = OrderedDict()
+
+
+def get_game():
+    """Return the game for this browser, creating one if needed."""
+    game_id = session.get("game_id")
+    if game_id not in games:
+        game_id = str(uuid.uuid4())
+        session["game_id"] = game_id
+        session.permanent = True
+        games[game_id] = ChessGame()
+        while len(games) > MAX_GAMES:
+            games.popitem(last=False)
+    else:
+        games.move_to_end(game_id)
+    return games[game_id]
 
 
 @app.route("/")
@@ -536,39 +617,55 @@ def index():
 @app.route("/api/game-state")
 def get_game_state():
     """Get current game state"""
+    game = get_game()
     return jsonify(game.get_game_state())
 
 
 @app.route("/api/valid-moves/<int:row>/<int:col>")
 def get_valid_moves(row, col):
     """Get legal moves for a piece at given position"""
+    game = get_game()
     moves = game.get_legal_moves(row, col)
-    return jsonify({"moves": moves})
+    captures = [
+        [move_row, move_col]
+        for move_row, move_col in moves
+        if game.board[move_row][move_col] or game.en_passant_target == (move_row, move_col)
+    ]
+    return jsonify({"moves": moves, "captures": captures})
 
 
 @app.route("/api/make-move", methods=["POST"])
 def make_move():
     """Make a move"""
-    data = request.get_json()
+    game = get_game()
+    data = request.get_json(silent=True) or {}
     from_pos = tuple(data["from"])
     to_pos = tuple(data["to"])
+    promotion = data.get("promotion")
 
-    success, message = game.make_move(from_pos, to_pos)
+    success, message = game.make_move(from_pos, to_pos, promotion)
     return jsonify(
-        {"success": success, "message": message, "game_state": game.get_game_state()}
+        {
+            "success": success,
+            "message": message,
+            "needs_promotion": (not success) and message == "Choose a piece to promote to",
+            "game_state": game.get_game_state(),
+        }
     )
 
 
 @app.route("/api/new-game", methods=["POST"])
 def new_game():
-    """Start a new game"""
-    global game
-    game = ChessGame()
+    """Start a new game for this browser"""
+    game_id = session.get("game_id") or str(uuid.uuid4())
+    session["game_id"] = game_id
+    games[game_id] = ChessGame()
+    games.move_to_end(game_id)
     return jsonify(
         {
             "success": True,
             "message": "New game started",
-            "game_state": game.get_game_state(),
+            "game_state": games[game_id].get_game_state(),
         }
     )
 

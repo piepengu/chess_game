@@ -316,6 +316,55 @@
             border: 1px solid #c3e6cb;
         }
 
+        .promotion-dialog {
+            position: fixed;
+            inset: 0;
+            background: rgba(44, 62, 80, 0.55);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 20;
+        }
+
+        .promotion-dialog[hidden] {
+            display: none;
+        }
+
+        .promotion-card {
+            background: white;
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
+        }
+
+        .promotion-card p {
+            color: #2c3e50;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .promotion-choices {
+            display: flex;
+            gap: 10px;
+        }
+
+        .promotion-choice {
+            width: 72px;
+            height: 72px;
+            border: 2px solid #d5d8dc;
+            border-radius: 12px;
+            background-color: #f7f4ef;
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            cursor: pointer;
+        }
+
+        .promotion-choice:hover {
+            border-color: #667eea;
+        }
+
         .status-message.error {
             background: #f8d7da;
             color: #721c24;
@@ -405,12 +454,20 @@
         </div>
     </div>
 
+    <div id="promotionDialog" class="promotion-dialog" hidden>
+        <div class="promotion-card">
+            <p>Promote pawn to</p>
+            <div class="promotion-choices" id="promotionChoices"></div>
+        </div>
+    </div>
+
     <script>
         class ChessGame {
             constructor() {
                 this.board = [];
                 this.selectedSquare = null;
                 this.validMoves = [];
+                this.captureMoves = [];
                 this.gameState = null;
                 this.initializeBoard();
                 this.loadGameState();
@@ -482,10 +539,12 @@
             }
 
             getPieceImage(piece) {
-                return `/static/images/pieces/${piece}.png?v=2`;
+                return `/static/images/pieces/${piece}.png?v=3`;
             }
 
             async handleSquareClick(row, col) {
+                if (this.gameState && this.gameState.game_over) return;
+
                 const square = document.querySelector(`[data-row="${row}"][data-col="${col}"]`);
                 const piece = this.gameState.board[row][col];
 
@@ -518,6 +577,7 @@
                     const response = await fetch(`/api/valid-moves/${row}/${col}`);
                     const data = await response.json();
                     this.validMoves = data.moves;
+                    this.captureMoves = data.captures || [];
                     this.highlightValidMoves();
                 } catch (error) {
                     console.error('Error getting valid moves:', error);
@@ -527,9 +587,11 @@
             highlightValidMoves() {
                 this.validMoves.forEach(([row, col]) => {
                     const square = document.querySelector(`[data-row="${row}"][data-col="${col}"]`);
-                    const piece = this.gameState.board[row][col];
+                    const isCapture = this.captureMoves.some(([captureRow, captureCol]) => {
+                        return captureRow === row && captureCol === col;
+                    });
 
-                    if (piece) {
+                    if (isCapture) {
                         square.classList.add('capture');
                     } else {
                         square.classList.add('valid-move');
@@ -547,8 +609,37 @@
                 return this.validMoves.some(([row, col]) => row === toRow && col === toCol);
             }
 
-            async makeMove(fromRow, fromCol, toRow, toCol) {
+            askPromotion(color) {
+                const dialog = document.getElementById('promotionDialog');
+                const choices = document.getElementById('promotionChoices');
+                choices.innerHTML = '';
+
+                return new Promise((resolve) => {
+                    ['queen', 'rook', 'bishop', 'knight'].forEach((type) => {
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'promotion-choice';
+                        button.setAttribute('aria-label', type);
+                        button.style.backgroundImage = `url(${this.getPieceImage(`${color}_${type}`)})`;
+                        button.addEventListener('click', () => {
+                            dialog.hidden = true;
+                            resolve(type);
+                        });
+                        choices.appendChild(button);
+                    });
+                    dialog.hidden = false;
+                });
+            }
+
+            async makeMove(fromRow, fromCol, toRow, toCol, promotion) {
                 try {
+                    const piece = this.gameState.board[fromRow][fromCol];
+                    const isPawn = piece && piece.endsWith('_pawn');
+                    const promotionRank = piece && piece.startsWith('white') ? 0 : 7;
+                    if (isPawn && toRow === promotionRank && !promotion) {
+                        promotion = await this.askPromotion(piece.split('_')[0]);
+                    }
+
                     const response = await fetch('/api/make-move', {
                         method: 'POST',
                         headers: {
@@ -556,7 +647,8 @@
                         },
                         body: JSON.stringify({
                             from: [fromRow, fromCol],
-                            to: [toRow, toCol]
+                            to: [toRow, toCol],
+                            promotion: promotion || null
                         })
                     });
 
@@ -566,7 +658,8 @@
                         this.gameState = result.game_state;
                         this.updateBoard();
                         this.updateUI();
-                        this.showStatus('Move successful!', 'success');
+                        const message = result.game_state.game_over ? result.message : 'Move successful!';
+                        this.showStatus(message, 'success');
                     } else {
                         this.showStatus(result.message, 'error');
                     }
@@ -599,7 +692,8 @@
 
                 if (this.gameState.game_over) {
                     if (this.gameState.game_result === 'checkmate') {
-                        const winner = this.gameState.current_player === 'white' ? 'Black' : 'White';
+                        const winnerName = this.gameState.winner || (this.gameState.current_player === 'white' ? 'black' : 'white');
+                        const winner = winnerName.charAt(0).toUpperCase() + winnerName.slice(1);
                         gameStatusElement.textContent = `Checkmate! ${winner} wins!`;
                         gameStatusElement.className = 'game-status checkmate';
                     } else if (this.gameState.game_result === 'stalemate') {
