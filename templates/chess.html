@@ -217,6 +217,31 @@
             box-shadow: 0 5px 15px rgba(149, 165, 166, 0.4);
         }
 
+        .btn-dark {
+            background: linear-gradient(45deg, #2c3e50, #1a252f);
+            color: white;
+        }
+
+        .btn-dark:hover {
+            background: linear-gradient(45deg, #1a252f, #0f161c);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(44, 62, 80, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .mode-label {
+            text-align: center;
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            margin-bottom: 12px;
+        }
+
         .move-history {
             max-height: 300px;
             overflow-y: auto;
@@ -419,7 +444,7 @@
     <div class="container">
         <div class="header">
             <h1>♔ Narnia Chess ♛</h1>
-            <p>Play chess with full move validation and beautiful UI</p>
+            <p>Play against the computer as White or Black</p>
             <div class="quote">"One always feels better when one has made up one's mind." - C.S. Lewis</div>
         </div>
 
@@ -432,10 +457,13 @@
                 <div class="current-player white" id="currentPlayer">
                     White's Turn
                 </div>
+                <div class="mode-label" id="modeLabel">Vs Computer · You are White</div>
                 <div id="gameStatus" class="game-status"></div>
 
                 <div class="controls">
-                    <button class="btn btn-primary" onclick="newGame()">New Game</button>
+                    <button class="btn btn-primary" onclick="playAsWhite()">Play as White</button>
+                    <button class="btn btn-dark" onclick="playAsBlack()">Play as Black</button>
+                    <button class="btn btn-secondary" onclick="playTwoPlayers()">Two Players</button>
                     <button class="btn btn-secondary" onclick="showValidMoves()">Show Valid Moves</button>
                 </div>
 
@@ -469,8 +497,15 @@
                 this.validMoves = [];
                 this.captureMoves = [];
                 this.gameState = null;
+                this.waitingForComputer = false;
                 this.initializeBoard();
                 this.loadGameState();
+            }
+
+            isHumanTurn() {
+                if (!this.gameState || this.gameState.game_over) return false;
+                if (this.gameState.mode !== 'computer') return true;
+                return this.gameState.current_player === this.gameState.human_color;
             }
 
             initializeBoard() {
@@ -510,6 +545,7 @@
                     this.gameState = await response.json();
                     this.updateBoard();
                     this.updateUI();
+                    await this.maybePlayComputer();
                 } catch (error) {
                     console.error('Error loading game state:', error);
                 }
@@ -544,6 +580,7 @@
 
             async handleSquareClick(row, col) {
                 if (this.gameState && this.gameState.game_over) return;
+                if (this.waitingForComputer || !this.isHumanTurn()) return;
 
                 const square = document.querySelector(`[data-row="${row}"][data-col="${col}"]`);
                 const piece = this.gameState.board[row][col];
@@ -560,7 +597,14 @@
                         await this.makeMove(fromRow, fromCol, row, col);
                     }
                     this.selectedSquare = null;
-                } else if (piece && this.getPieceColor(piece) === this.gameState.current_player) {
+                } else if (
+                    piece &&
+                    this.getPieceColor(piece) === this.gameState.current_player &&
+                    (
+                        this.gameState.mode !== 'computer' ||
+                        this.getPieceColor(piece) === this.gameState.human_color
+                    )
+                ) {
                     // Selecting a piece
                     this.selectedSquare = square;
                     square.classList.add('selected');
@@ -660,6 +704,7 @@
                         this.updateUI();
                         const message = result.game_state.game_over ? result.message : 'Move successful!';
                         this.showStatus(message, 'success');
+                        await this.maybePlayComputer();
                     } else {
                         this.showStatus(result.message, 'error');
                     }
@@ -669,13 +714,68 @@
                 }
             }
 
+            async maybePlayComputer() {
+                if (!this.gameState || !this.gameState.computer_turn || this.waitingForComputer) {
+                    return;
+                }
+
+                this.waitingForComputer = true;
+                this.clearHighlights();
+                this.selectedSquare = null;
+                this.updateUI();
+                this.showStatus('Computer is thinking...', 'success');
+
+                await new Promise((resolve) => setTimeout(resolve, 450));
+
+                try {
+                    const response = await fetch('/api/computer-move', { method: 'POST' });
+                    const result = await response.json();
+                    if (result.success) {
+                        this.gameState = result.game_state;
+                        this.updateBoard();
+                        this.updateUI();
+                        const message = result.game_state.game_over
+                            ? result.message
+                            : 'Computer moved';
+                        this.showStatus(message, 'success');
+                    } else if (result.message !== "Not the computer's turn") {
+                        this.showStatus(result.message, 'error');
+                    }
+                } catch (error) {
+                    console.error('Error making computer move:', error);
+                    this.showStatus('Error making computer move', 'error');
+                } finally {
+                    this.waitingForComputer = false;
+                    this.updateUI();
+                }
+            }
+
             updateUI() {
                 if (!this.gameState) return;
 
                 // Update current player
                 const currentPlayerElement = document.getElementById('currentPlayer');
-                currentPlayerElement.textContent = `${this.gameState.current_player.charAt(0).toUpperCase() + this.gameState.current_player.slice(1)}'s Turn`;
+                const side = this.gameState.current_player.charAt(0).toUpperCase() + this.gameState.current_player.slice(1);
+                if (this.gameState.mode === 'computer') {
+                    if (this.waitingForComputer || this.gameState.computer_turn) {
+                        currentPlayerElement.textContent = 'Computer thinking...';
+                    } else if (this.isHumanTurn()) {
+                        currentPlayerElement.textContent = `Your turn (${side})`;
+                    } else {
+                        currentPlayerElement.textContent = `${side}'s Turn`;
+                    }
+                } else {
+                    currentPlayerElement.textContent = `${side}'s Turn`;
+                }
                 currentPlayerElement.className = `current-player ${this.gameState.current_player}`;
+
+                const modeLabel = document.getElementById('modeLabel');
+                if (this.gameState.mode === 'computer') {
+                    const you = this.gameState.human_color.charAt(0).toUpperCase() + this.gameState.human_color.slice(1);
+                    modeLabel.textContent = `Vs Computer · You are ${you}`;
+                } else {
+                    modeLabel.textContent = 'Local two-player game';
+                }
 
                 // Update game status
                 this.updateGameStatus();
@@ -761,10 +861,17 @@
                 }, 3000);
             }
 
-            async newGame() {
+            async newGame(options = {}) {
                 try {
                     const response = await fetch('/api/new-game', {
-                        method: 'POST'
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            mode: options.mode || 'computer',
+                            human_color: options.human_color || 'white',
+                        }),
                     });
                     const result = await response.json();
 
@@ -772,10 +879,12 @@
                         this.gameState = result.game_state;
                         this.selectedSquare = null;
                         this.validMoves = [];
+                        this.waitingForComputer = false;
                         this.clearHighlights();
                         this.updateBoard();
                         this.updateUI();
-                        this.showStatus('New game started!', 'success');
+                        this.showStatus(result.message, 'success');
+                        await this.maybePlayComputer();
                     }
                 } catch (error) {
                     console.error('Error starting new game:', error);
@@ -788,11 +897,20 @@
         const chessGame = new ChessGame();
 
         // Global functions for buttons
-        function newGame() {
-            chessGame.newGame();
+        function playAsWhite() {
+            chessGame.newGame({ mode: 'computer', human_color: 'white' });
+        }
+
+        function playAsBlack() {
+            chessGame.newGame({ mode: 'computer', human_color: 'black' });
+        }
+
+        function playTwoPlayers() {
+            chessGame.newGame({ mode: 'local', human_color: 'white' });
         }
 
         function showValidMoves() {
+            if (!chessGame.isHumanTurn() || chessGame.waitingForComputer) return;
             if (chessGame.selectedSquare) {
                 const row = parseInt(chessGame.selectedSquare.dataset.row);
                 const col = parseInt(chessGame.selectedSquare.dataset.col);

@@ -4,6 +4,7 @@ Chess Game Application
 A complete chess game with move validation and game state management
 """
 
+import random
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -13,11 +14,20 @@ from flask import Flask, jsonify, render_template, request, session
 app = Flask(__name__)
 app.secret_key = "chess_game_secret_key_2024"
 
+PIECE_VALUES = {
+    "pawn": 1,
+    "knight": 3,
+    "bishop": 3,
+    "rook": 5,
+    "queen": 9,
+    "king": 100,
+}
+
 
 class ChessGame:
     """Chess game logic and state management"""
 
-    def __init__(self):
+    def __init__(self, mode="computer", human_color="white"):
         self.board = self.initialize_board()
         self.current_player = "white"
         self.game_over = False
@@ -26,6 +36,10 @@ class ChessGame:
         self.captured_pieces = {"white": [], "black": []}
         self.en_passant_target = None
         self.winner = None
+        self.mode = mode if mode in ("computer", "local") else "computer"
+        self.human_color = (
+            human_color if human_color in ("white", "black") else "white"
+        )
         # Track piece movements for castling
         self.piece_moved = {
             "white_king": False,
@@ -35,6 +49,19 @@ class ChessGame:
             "black_rook_queenside": False,
             "black_rook_kingside": False,
         }
+
+    @property
+    def computer_color(self):
+        if self.mode != "computer":
+            return None
+        return "black" if self.human_color == "white" else "white"
+
+    def is_computer_turn(self):
+        return (
+            self.mode == "computer"
+            and not self.game_over
+            and self.current_player == self.computer_color
+        )
 
     def initialize_board(self):
         """Initialize the chess board with pieces in starting positions"""
@@ -405,6 +432,75 @@ class ChessGame:
 
         return moved_piece, captured_piece
 
+    def get_all_legal_moves(self):
+        """All legal moves for the side to move"""
+        moves = []
+        for row in range(8):
+            for col in range(8):
+                piece = self.board[row][col]
+                if piece and self.get_piece_color(piece) == self.current_player:
+                    for to_pos in self.get_legal_moves(row, col):
+                        moves.append(((row, col), to_pos))
+        return moves
+
+    def score_move(self, from_pos, to_pos):
+        """Simple heuristic: prefer captures, checks, promotion, and the center"""
+        from_row, from_col = from_pos
+        to_row, to_col = to_pos
+        piece = self.board[from_row][from_col]
+        mover = self.current_player
+        opponent = "black" if mover == "white" else "white"
+
+        captured = self.board[to_row][to_col]
+        if (
+            self.get_piece_type(piece) == "pawn"
+            and self.en_passant_target == (to_row, to_col)
+            and not captured
+        ):
+            direction = -1 if mover == "white" else 1
+            captured = self.board[to_row - direction][to_col]
+
+        score = random.random()
+        if captured:
+            score += PIECE_VALUES.get(self.get_piece_type(captured), 0) * 10
+        if self.get_piece_type(piece) == "pawn" and to_row in (0, 7):
+            score += 8
+        score += (3.5 - abs(to_row - 3.5)) * 0.05
+        score += (3.5 - abs(to_col - 3.5)) * 0.05
+
+        saved = self._save_position()
+        try:
+            self._place_move(from_pos, to_pos, promotion="queen")
+            if self.is_king_in_check(opponent):
+                score += 4
+        finally:
+            self._restore_position(saved)
+
+        return score
+
+    def choose_computer_move(self):
+        """Pick a legal computer move using a light heuristic"""
+        candidates = self.get_all_legal_moves()
+        if not candidates:
+            return None
+        return max(candidates, key=lambda move: self.score_move(*move))
+
+    def make_computer_move(self):
+        """Play one computer move if it is the computer's turn"""
+        if not self.is_computer_turn():
+            return False, "Not the computer's turn"
+
+        choice = self.choose_computer_move()
+        if not choice:
+            return False, "No legal computer moves"
+
+        from_pos, to_pos = choice
+        piece = self.board[from_pos[0]][from_pos[1]]
+        promotion = None
+        if self.get_piece_type(piece) == "pawn" and to_pos[0] in (0, 7):
+            promotion = "queen"
+        return self.make_move(from_pos, to_pos, promotion)
+
     def make_move(self, from_pos, to_pos, promotion=None):
         """Make a move on the board"""
         from_row, from_col = from_pos
@@ -586,6 +682,10 @@ class ChessGame:
             "captured_pieces": self.captured_pieces,
             "in_check": self.is_king_in_check(self.current_player),
             "winner": self.winner,
+            "mode": self.mode,
+            "human_color": self.human_color,
+            "computer_color": self.computer_color,
+            "computer_turn": self.is_computer_turn(),
         }
 
 
@@ -636,12 +736,32 @@ def get_valid_moves(row, col):
 
 @app.route("/api/make-move", methods=["POST"])
 def make_move():
-    """Make a move"""
+    """Make a human move"""
     game = get_game()
+    if game.is_computer_turn():
+        return jsonify(
+            {
+                "success": False,
+                "message": "Wait for the computer to move",
+                "game_state": game.get_game_state(),
+            }
+        )
+
     data = request.get_json(silent=True) or {}
     from_pos = tuple(data["from"])
     to_pos = tuple(data["to"])
     promotion = data.get("promotion")
+
+    if game.mode == "computer":
+        piece = game.board[from_pos[0]][from_pos[1]]
+        if piece and game.get_piece_color(piece) != game.human_color:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": "You can only move your pieces",
+                    "game_state": game.get_game_state(),
+                }
+            )
 
     success, message = game.make_move(from_pos, to_pos, promotion)
     return jsonify(
@@ -654,17 +774,39 @@ def make_move():
     )
 
 
+@app.route("/api/computer-move", methods=["POST"])
+def computer_move():
+    """Make the computer's move"""
+    game = get_game()
+    success, message = game.make_computer_move()
+    return jsonify(
+        {
+            "success": success,
+            "message": message,
+            "game_state": game.get_game_state(),
+        }
+    )
+
+
 @app.route("/api/new-game", methods=["POST"])
 def new_game():
     """Start a new game for this browser"""
+    data = request.get_json(silent=True) or {}
+    mode = data.get("mode", "computer")
+    human_color = data.get("human_color", "white")
     game_id = session.get("game_id") or str(uuid.uuid4())
     session["game_id"] = game_id
-    games[game_id] = ChessGame()
+    games[game_id] = ChessGame(mode=mode, human_color=human_color)
     games.move_to_end(game_id)
+    message = "New game started"
+    if mode == "computer":
+        message = f"Playing as {human_color} against the computer"
+    elif mode == "local":
+        message = "Local two-player game started"
     return jsonify(
         {
             "success": True,
-            "message": "New game started",
+            "message": message,
             "game_state": games[game_id].get_game_state(),
         }
     )
